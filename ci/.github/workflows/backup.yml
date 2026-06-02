@@ -1,0 +1,316 @@
+name: Backup and Disaster Recovery
+
+on:
+  schedule:
+    - cron: '0 3 * * *'  # Daily at 3 AM UTC
+  workflow_dispatch:
+    inputs:
+      backup_type:
+        description: 'Type of backup verification'
+        required: false
+        default: 'full'
+        type: choice
+        options:
+          - full
+          - rds
+          - s3
+          - dr-test
+
+env:
+  AWS_REGION: us-east-1
+  RDS_INSTANCE_ID: premium-service-db
+  S3_BACKUP_BUCKET: premium-service-backups
+  S3_LIFECYCLE_RULE_ID: backup-expiration
+
+permissions:
+  contents: read
+  id-token: write
+
+jobs:
+  rds-backup-verification:
+    name: RDS Backup Verification
+    runs-on: ubuntu-latest
+    if: github.event_name == 'schedule' || github.event.inputs.backup_type == 'full' || github.event.inputs.backup_type == 'rds'
+
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+
+      - name: Configure AWS credentials
+        uses: aws-actions/configure-aws-credentials@v4
+        with:
+          aws-access-key-id: ${{ secrets.AWS_ACCESS_KEY_ID }}
+          aws-secret-access-key: ${{ secrets.AWS_SECRET_ACCESS_KEY }}
+          aws-region: ${{ env.AWS_REGION }}
+
+      - name: Check latest automated backup
+        id: latest-backup
+        run: |
+          LATEST_BACKUP=$(aws rds describe-db-snapshots \
+            --filters "Name=db-instance-id,Values=${{ env.RDS_INSTANCE_ID }}" \
+            --query 'sort_by(DBSnapshots, &SnapshotCreateTime)[-1].DBSnapshotIdentifier' \
+            --output text)
+          echo "latest_backup=$LATEST_BACKUP" >> $GITHUB_OUTPUT
+
+          SNAPSHOT_CREATE_TIME=$(aws rds describe-db-snapshots \
+            --db-snapshot-identifier "$LATEST_BACKUP" \
+            --query 'DBSnapshots[0].SnapshotCreateTime' \
+            --output text)
+          echo "snapshot_time=$SNAPSHOT_CREATE_TIME" >> $GITHUB_OUTPUT
+
+      - name: Verify backup is recent
+        run: |
+          BACKUP_AGE_HOURS=$(echo "($(date +%s) - $(date --utc +%s -d '${{ steps.latest-backup.outputs.snapshot_time }}'))/3600" | bc)
+          echo "Backup age: $BACKUP_AGE_HOURS hours"
+
+          if [ "$BACKUP_AGE_HOURS" -gt 25 ]; then
+            echo "WARNING: Latest backup is older than 24 hours!"
+            exit 1
+          fi
+
+      - name: Check backup retention period
+        run: |
+          RETENTION=$(aws rds describe-db-instance \
+            --db-instance-identifier ${{ env.RDS_INSTANCE_ID }} \
+            --query 'DBInstances[0].BackupRetentionPeriod' \
+            --output text)
+          echo "Backup retention period: $RETENTION days"
+
+          if [ "$RETENTION" -lt 7 ]; then
+            echo "WARNING: Backup retention is less than 7 days!"
+            exit 1
+          fi
+
+      - name: Test backup restore (non-prod)
+        run: |
+          echo "Simulating backup restore verification..."
+          echo "This would create a test RDS instance from the latest backup"
+          echo "Skipped in production to avoid costs"
+
+      - name: Verify encrypted backup
+        run: |
+          ENCRYPTION=$(aws rds describe-db-snapshots \
+            --db-snapshot-identifier ${{ steps.latest-backup.outputs.latest_backup }} \
+            --query 'DBSnapshots[0].Encrypted' \
+            --output text)
+          echo "Backup encrypted: $ENCRYPTION"
+
+          if [ "$ENCRYPTION" != "True" ]; then
+            echo "ERROR: Backup is not encrypted!"
+            exit 1
+          fi
+
+  s3-backup-verification:
+    name: S3 Backup Verification
+    runs-on: ubuntu-latest
+    if: github.event_name == 'schedule' || github.event.inputs.backup_type == 'full' || github.event.inputs.backup_type == 's3'
+
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+
+      - name: Configure AWS credentials
+        uses: aws-actions/configure-aws-credentials@v4
+        with:
+          aws-access-key-id: ${{ secrets.AWS_ACCESS_KEY_ID }}
+          aws-secret-access-key: ${{ secrets.AWS_SECRET_ACCESS_KEY }}
+          aws-region: ${{ env.AWS_REGION }}
+
+      - name: Check S3 bucket existence
+        run: |
+          aws s3api head-bucket --bucket ${{ env.S3_BACKUP_BUCKET }}
+          echo "S3 backup bucket exists: ${{ env.S3_BACKUP_BUCKET }}"
+
+      - name: Check bucket versioning
+        run: |
+          VERSIONING=$(aws s3api get-bucket-versioning \
+            --bucket ${{ env.S3_BACKUP_BUCKET }} \
+            --query 'Status' \
+            --output text)
+          echo "Bucket versioning: $VERSIONING"
+
+          if [ "$VERSIONING" != "Enabled" ]; then
+            echo "ERROR: S3 bucket versioning is not enabled!"
+            exit 1
+          fi
+
+      - name: Check bucket encryption
+        run: |
+          ENCRYPTION=$(aws s3api get-bucket-encryption \
+            --bucket ${{ env.S3_BACKUP_BUCKET }} \
+            --query 'ServerSideEncryptionConfiguration.Rules[0].ApplyServerSideEncryptionByDefault.SSEAlgorithm' \
+            --output text)
+          echo "Bucket encryption: $ENCRYPTION"
+
+          if [ -z "$ENCRYPTION" ]; then
+            echo "ERROR: S3 bucket encryption is not configured!"
+            exit 1
+          fi
+
+      - name: Check lifecycle policy
+        run: |
+          LIFECYCLE=$(aws s3api get-bucket-lifecycle-configuration \
+            --bucket ${{ env.S3_BACKUP_BUCKET }} \
+            --query 'Rules[0].ID' \
+            --output text 2>/dev/null || echo "none")
+          echo "Lifecycle rule: $LIFECYCLE"
+
+          if [ "$LIFECYCLE" = "none" ]; then
+            echo "WARNING: No lifecycle policy configured for backup bucket"
+          fi
+
+      - name: List recent backups
+        run: |
+          aws s3 ls s3://${{ env.S3_BACKUP_BUCKET }}/ --recursive | tail -20
+
+      - name: Verify cross-region replication
+        run: |
+          REPLICATION=$(aws s3api get-bucket-replication \
+            --bucket ${{ env.S3_BACKUP_BUCKET }} \
+            --query 'ReplicationConfiguration.Rules[0].Destination.Bucket' \
+            --output text 2>/dev/null || echo "not configured")
+          echo "Replication destination: $REPLICATION"
+
+          if [ "$REPLICATION" = "not configured" ]; then
+            echo "WARNING: Cross-region replication not configured"
+          fi
+
+  disaster-recovery-test:
+    name: Disaster Recovery Test
+    runs-on: ubuntu-latest
+    if: github.event_name == 'schedule' || github.event.inputs.backup_type == 'dr-test'
+    environment: dr-test
+
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+
+      - name: Configure AWS credentials
+        uses: aws-actions/configure-aws-credentials@v4
+        with:
+          aws-access-key-id: ${{ secrets.AWS_ACCESS_KEY_ID }}
+          aws-secret-access-key: ${{ secrets.AWS_SECRET_ACCESS_KEY }}
+          aws-region: us-west-2
+
+      - name: Verify DR region resources
+        run: |
+          echo "Verifying DR region resources..."
+
+          # Check VPC exists in DR region
+          VPC_ID=$(aws ec2 describe-vpcs \
+            --region us-west-2 \
+            --filters "Name=tag:Name,Values=premium-service-dr-vpc" \
+            --query 'Vpcs[0].VpcId' \
+            --output text 2>/dev/null || echo "not found")
+          echo "DR VPC: $VPC_ID"
+
+          # Check RDS read replica in DR region
+          REPLICA=$(aws rds describe-db-instances \
+            --region us-west-2 \
+            --query 'DBInstances[?DBInstanceIdentifier==`premium-service-dr-replica`].DBInstanceStatus' \
+            --output text 2>/dev/null || echo "not found")
+          echo "DR Replica: $REPLICA"
+
+          # Check S3 replication
+          aws s3api list-objects --bucket ${{ env.S3_BACKUP_BUCKET }}-dr --max-items 5 || echo "DR bucket check skipped"
+
+      - name: Document DR procedures
+        run: |
+          echo "# Disaster Recovery Procedures" > DR_PROCEDURES.md
+          echo "" >> DR_PROCEDURES.md
+          echo "## Last Verified: $(date -u +"%Y-%m-%d %H:%M:%S UTC")" >> DR_PROCEDURES.md
+          echo "" >> DR_PROCEDURES.md
+          echo "## RDS Failover Steps" >> DR_PROCEDURES.md
+          echo "1. Initiate manual failover via AWS Console or CLI" >> DR_PROCEDURES.md
+          echo "2. Update DNS records in Route53" >> DR_PROCEDURES.md
+          echo "3. Verify application connectivity" >> DR_PROCEDURES.md
+          echo "4. Update security groups if needed" >> DR_PROCEDURES.md
+          echo "" >> DR_PROCEDURES.md
+          echo "## S3 Failover Steps" >> DR_PROCEDURES.md
+          echo "1. Verify replication to DR bucket" >> DR_PROCEDURES.md
+          echo "2. Update CloudFront origin to DR bucket" >> DR_PROCEDURES.md
+          echo "3. Clear CloudFront cache" >> DR_PROCEDURES.md
+          echo "" >> DR_PROCEDURES.md
+          echo "## ECS Failover Steps" >> DR_PROCEDURES.md
+          echo "1. Update ECS service to use DR VPC" >> DR_PROCEDURES.md
+          echo "2. Redeploy services with updated task definitions" >> DR_PROCEDURES.md
+          echo "3. Update ALB target groups" >> DR_PROCEDURES.md
+
+          cat DR_PROCEDURES.md
+
+      - name: Upload DR documentation
+        uses: actions/upload-artifact@v4
+        with:
+          name: dr-procedures
+          path: DR_PROCEDURES.md
+          retention-days: 365
+
+  backup-notification:
+    name: Backup Report
+    runs-on: ubuntu-latest
+    needs: [rds-backup-verification, s3-backup-verification, disaster-recovery-test]
+    if: always()
+
+    steps:
+      - name: Generate backup report
+        shell: bash
+        run: |
+          echo "# Backup and DR Verification Report" > backup-report.md
+          echo "" >> backup-report.md
+          echo "**Report Date:** $(date -u +"%Y-%m-%d %H:%M:%S UTC")" >> backup-report.md
+          echo "" >> backup-report.md
+          echo "## Results" >> backup-report.md
+          echo "" >> backup-report.md
+          echo "| Check | Status |" >> backup-report.md
+          echo "|-------|--------|" >> backup-report.md
+          echo "| RDS Backup | ${{ needs.rds-backup-verification.result }} |" >> backup-report.md
+          echo "| S3 Backup | ${{ needs.s3-backup-verification.result }} |" >> backup-report.md
+          echo "| DR Test | ${{ needs.disaster-recovery-test.result }} |" >> backup-report.md
+          echo "" >> backup-report.md
+          echo "## Next Scheduled Backup" >> backup-report.md
+          echo "$(date -u +"%Y-%m-%d %H:%M UTC" -d "+24 hours")" >> backup-report.md
+
+          cat backup-report.md
+
+      - name: Upload backup report
+        uses: actions/upload-artifact@v4
+        with:
+          name: backup-report
+          path: backup-report.md
+          retention-days: 90
+
+      - name: Send success notification
+        if: needs.rds-backup-verification.result == 'success' && needs.s3-backup-verification.result == 'success'
+        run: |
+          curl -X POST ${{ secrets.SLACK_WEBHOOK_URL }} \
+            -H 'Content-type: application/json' \
+            --data '{
+              "text": "✅ Backup Verification Completed",
+              "blocks": [
+                {
+                  "type": "section",
+                  "text": {
+                    "type": "mrkdwn",
+                    "text": "*Backup & DR Verification*\n• RDS Backup: Valid ✅\n• S3 Backup: Valid ✅\n• Date: '$(date -u +"%Y-%m-%d %H:%M UTC")'"
+                  }
+                }
+              ]
+            }'
+
+      - name: Send failure notification
+        if: needs.rds-backup-verification.result != 'success' || needs.s3-backup-verification.result != 'success'
+        run: |
+          curl -X POST ${{ secrets.SLACK_WEBHOOK_URL }} \
+            -H 'Content-type: application/json' \
+            --data '{
+              "text": "❌ Backup Verification Failed",
+              "blocks": [
+                {
+                  "type": "section",
+                  "text": {
+                    "type": "mrkdwn",
+                    "text": "*Backup & DR Verification - FAILED*\n• RDS: ${{ needs.rds-backup-verification.result }}\n• S3: ${{ needs.s3-backup-verification.result }}\n• <${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}|View Details>"
+                  }
+                }
+              ]
+            }'

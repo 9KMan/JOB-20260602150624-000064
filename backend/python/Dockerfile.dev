@@ -1,0 +1,60 @@
+# Stage 1: Builder
+FROM python:3.11-slim as builder
+
+WORKDIR /app
+
+# Install build dependencies
+RUN apt-get update && apt-get install -y --no-install-recommends \
+    build-essential \
+    libpq-dev \
+    curl \
+    && rm -rf /var/lib/apt/lists/*
+
+# Copy requirements and install dependencies
+COPY requirements.txt .
+COPY requirements-dev.txt .
+RUN pip install --no-cache-dir --user -r requirements-dev.txt
+
+# Copy application source
+COPY src/ ./src/
+COPY tests/ ./tests/
+COPY pyproject.toml .
+COPY alembic.ini .
+
+# Stage 2: Development
+FROM python:3.11-slim as development
+
+WORKDIR /app
+
+# Install system dependencies
+RUN apt-get update && apt-get install -y --no-install-recommends \
+    libpq-dev \
+    chromium \
+    && rm -rf /var/lib/apt/lists/*
+
+# Copy Python packages from builder
+COPY --from=builder /root/.local /home/appuser/.local
+
+# Create non-root user
+RUN groupadd -r appgroup && useradd -r -g appgroup appuser
+
+# Copy application source
+COPY --from=builder /app/src/ ./src/
+COPY --from=builder /app/tests/ ./tests/
+COPY --from=builder /app/pyproject.toml .
+COPY --from=builder /app/alembic.ini .
+
+# Set environment variables
+ENV PYTHONUNBUFFERED=1 \
+    PYTHONDONTWRITEBYTECODE=1 \
+    PATH=/home/appuser/.local/bin:$PATH \
+    USER=appuser
+
+# Switch to non-root user
+USER appuser
+
+# Expose port
+EXPOSE 8000
+
+# Run application with hot reload
+CMD ["uvicorn", "src.main:app", "--host", "0.0.0.0", "--port", "8000", "--reload"]

@@ -1,0 +1,118 @@
+version: "3.9"
+
+services:
+  app:
+    build:
+      context: .
+      dockerfile: Dockerfile.dev
+    container_name: psd-app
+    ports:
+      - "8000:8000"
+    environment:
+      - DATABASE_URL=postgresql://postgres:postgres@db:5432/psd_dev
+      - REDIS_URL=redis://redis:6379/0
+      - ENVIRONMENT=development
+      - LOG_LEVEL=DEBUG
+      - AUTH0_DOMAIN=${AUTH0_DOMAIN:-auth.example.com}
+      - AUTH0_AUDIENCE=${AUTH0_AUDIENCE:-https://api.example.com}
+      - AUTH0_ALGORITHMS=${AUTH0_ALGORITHMS:-RS256}
+      - YOTI_CLIENT_SDK_ID=${YOTI_CLIENT_SDK_ID:-}
+      - YOTI_PEM_FILE=${YOTI_PEM_FILE:-}
+      - CCBILL_ACCOUNT_NUMBER=${CCBILL_ACCOUNT_NUMBER:-}
+      - CCBILL_SUB_ACCOUNT_NUMBER=${CCBILL_SUB_ACCOUNT_NUMBER:-}
+      - CCBILL_SALT=${CCBILL_SALT:-}
+      - PIPEDRIVE_API_TOKEN=${PIPEDRIVE_API_TOKEN:-}
+      - HUBSPOT_API_KEY=${HUBSPOT_API_KEY:-}
+      - MAUTIC_URL=${MAUTIC_URL:-}
+      - MAUTIC_USERNAME=${MAUTIC_USERNAME:-}
+      - MAUTIC_PASSWORD=${MAUTIC_PASSWORD:-}
+      - AWS_ACCESS_KEY_ID=${AWS_ACCESS_KEY_ID:-}
+      - AWS_SECRET_ACCESS_KEY=${AWS_SECRET_ACCESS_KEY:-}
+      - AWS_REGION=${AWS_REGION:-us-east-1}
+      - S3_BUCKET=${S3_BUCKET:-}
+      - ONDATO_USERNAME=${ONDATO_USERNAME:-}
+      - ONDATO_PASSWORD=${ONDATO_PASSWORD:-}
+      - ONDATO_ORGANIZATION_ID=${ONDATO_ORGANIZATION_ID:-}
+      - BLUECHECK_API_KEY=${BLUECHECK_API_KEY:-}
+    volumes:
+      - ./src:/app/src:ro
+      - ./tests:/app/tests:ro
+    depends_on:
+      db:
+        condition: service_healthy
+      redis:
+        condition: service_started
+    networks:
+      - psd-network
+
+  db:
+    image: postgres:16-alpine
+    container_name: psd-db
+    environment:
+      - POSTGRES_USER=postgres
+      - POSTGRES_PASSWORD=postgres
+      - POSTGRES_DB=psd_dev
+    ports:
+      - "5432:5432"
+    volumes:
+      - psd-db-data:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U postgres"]
+      interval: 5s
+      timeout: 5s
+      retries: 5
+    networks:
+      - psd-network
+
+  redis:
+    image: redis:7-alpine
+    container_name: psd-redis
+    ports:
+      - "6379:6379"
+    volumes:
+      - psd-redis-data:/data
+    networks:
+      - psd-network
+
+  celery_worker:
+    build:
+      context: .
+      dockerfile: Dockerfile.dev
+    container_name: psd-celery
+    command: celery -A src.workers.celery_app worker --loglevel=info
+    environment:
+      - DATABASE_URL=postgresql://postgres:postgres@db:5432/psd_dev
+      - REDIS_URL=redis://redis:6379/0
+      - ENVIRONMENT=development
+    volumes:
+      - ./src:/app/src:ro
+    depends_on:
+      - db
+      - redis
+    networks:
+      - psd-network
+
+  celery_beat:
+    build:
+      context: .
+      dockerfile: Dockerfile.dev
+    container_name: psd-celery-beat
+    command: celery -A src.workers.celery_app beat --loglevel=info
+    environment:
+      - DATABASE_URL=postgresql://postgres:postgres@db:5432/psd_dev
+      - REDIS_URL=redis://redis:6379/0
+    volumes:
+      - ./src:/app/src:ro
+    depends_on:
+      - db
+      - redis
+    networks:
+      - psd-network
+
+volumes:
+  psd-db-data:
+  psd-redis-data:
+
+networks:
+  psd-network:
+    driver: bridge

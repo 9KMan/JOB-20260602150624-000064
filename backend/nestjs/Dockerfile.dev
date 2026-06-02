@@ -1,0 +1,19 @@
+# Development stage
+FROM node:20-alpine AS development
+
+WORKDIR /app
+
+# Install dependencies
+RUN apk add --no-cache git
+
+# Copy package files
+COPY package*.json ./
+
+# Install all dependencies (including dev)
+RUN npm ci
+
+# Copy source code
+COPY . .
+
+# Start application in watch mode
+CMD ["npm", "run", "start:dev"]

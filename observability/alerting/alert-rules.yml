@@ -1,0 +1,431 @@
+# Alert Rules for Premium Service Directory Platform
+# Version: 1.0.0
+
+groups:
+  - name: infrastructure_alerts
+    interval: 30s
+    rules:
+      # High CPU Alert
+      - alert: HighCPU
+        expr: avg(rate(container_cpu_usage_seconds_total{name=~"backend.*|frontend.*"}[5m])) by (name) * 100 > 80
+        for: 5m
+        labels:
+          severity: warning
+          service: platform
+          team: infrastructure
+        annotations:
+          summary: "High CPU usage detected on {{ $labels.name }}"
+          description: "CPU usage is above 80% for more than 5 minutes. Current value: {{ $value | printf \"%.2f\" }}%"
+          runbook_url: "https://runbooks.example.com/high-cpu"
+
+      - alert: CriticalCPU
+        expr: avg(rate(container_cpu_usage_seconds_total{name=~"backend.*|frontend.*"}[5m])) by (name) * 100 > 95
+        for: 2m
+        labels:
+          severity: critical
+          service: platform
+          team: infrastructure
+        annotations:
+          summary: "Critical CPU usage on {{ $labels.name }}"
+          description: "CPU usage is above 95% for more than 2 minutes. Immediate action required. Current value: {{ $value | printf \"%.2f\" }}%"
+          runbook_url: "https://runbooks.example.com/critical-cpu"
+
+      # High Memory Alert
+      - alert: HighMemory
+        expr: avg(container_memory_usage_bytes{name=~"backend.*|frontend.*"}) by (name) / avg(container_memory_limit_bytes{name=~"backend.*|frontend.*"}) by (name) * 100 > 80
+        for: 5m
+        labels:
+          severity: warning
+          service: platform
+          team: infrastructure
+        annotations:
+          summary: "High memory usage on {{ $labels.name }}"
+          description: "Memory usage is above 80% for more than 5 minutes. Current value: {{ $value | printf \"%.2f\" }}%"
+          runbook_url: "https://runbooks.example.com/high-memory"
+
+      - alert: CriticalMemory
+        expr: avg(container_memory_usage_bytes{name=~"backend.*|frontend.*"}) by (name) / avg(container_memory_limit_bytes{name=~"backend.*|frontend.*"}) by (name) * 100 > 95
+        for: 2m
+        labels:
+          severity: critical
+          service: platform
+          team: infrastructure
+        annotations:
+          summary: "Critical memory usage on {{ $labels.name }}"
+          description: "Memory usage is above 95% for more than 2 minutes. Risk of OOM kill. Current value: {{ $value | printf \"%.2f\" }}%"
+          runbook_url: "https://runbooks.example.com/critical-memory"
+
+      # High Disk Alert
+      - alert: HighDiskUsage
+        expr: node_filesystem_avail_bytes{mountpoint="/"} / node_filesystem_size_bytes{mountpoint="/"} * 100 < 20
+        for: 10m
+        labels:
+          severity: warning
+          service: platform
+          team: infrastructure
+        annotations:
+          summary: "Low disk space on {{ $labels.instance }}"
+          description: "Disk usage is above 80% on {{ $labels.mountpoint }}. Available: {{ $value | printf \"%.2f\" }}%"
+          runbook_url: "https://runbooks.example.com/high-disk"
+
+      - alert: CriticalDiskUsage
+        expr: node_filesystem_avail_bytes{mountpoint="/"} / node_filesystem_size_bytes{mountpoint="/"} * 100 < 10
+        for: 5m
+        labels:
+          severity: critical
+          service: platform
+          team: infrastructure
+        annotations:
+          summary: "Critical disk space on {{ $labels.instance }}"
+          description: "Disk usage is above 90% on {{ $labels.mountpoint }}. Available: {{ $value | printf \"%.2f\" }}%"
+          runbook_url: "https://runbooks.example.com/critical-disk"
+
+      # Disk I/O Alert
+      - alert: HighDiskIO
+        expr: rate(node_disk_io_time_seconds_total[5m]) * 100 > 80
+        for: 5m
+        labels:
+          severity: warning
+          service: platform
+          team: infrastructure
+        annotations:
+          summary: "High disk I/O on {{ $labels.instance }}"
+          description: "Disk I/O utilization is above 80% for more than 5 minutes. Current value: {{ $value | printf \"%.2f\" }}%"
+          runbook_url: "https://runbooks.example.com/high-disk-io"
+
+  - name: service_alerts
+    interval: 30s
+    rules:
+      # Service Down Alert
+      - alert: ServiceDown
+        expr: up{job=~"backend.*|frontend.*"} == 0
+        for: 1m
+        labels:
+          severity: critical
+          service: platform
+          team: backend
+        annotations:
+          summary: "{{ $labels.job }} is down"
+          description: "{{ $labels.job }} has been unreachable for more than 1 minute."
+          runbook_url: "https://runbooks.example.com/service-down"
+
+      - alert: ServiceDegraded
+        expr: up{job=~"backend.*|frontend.*"} == 1 and rate(http_requests_total{job=~"backend.*",status=~"5.."}[5m]) / rate(http_requests_total{job=~"backend.*"}[5m]) > 0.05
+        for: 5m
+        labels:
+          severity: warning
+          service: platform
+          team: backend
+        annotations:
+          summary: "{{ $labels.job }} is degraded"
+          description: "{{ $labels.job }} error rate is above 5% for more than 5 minutes."
+          runbook_url: "https://runbooks.example.com/service-degraded"
+
+      # High Error Rate
+      - alert: HighErrorRate
+        expr: sum(rate(http_requests_total{status=~"5.."}[5m])) by (service, job) / sum(rate(http_requests_total[5m])) by (service, job) * 100 > 5
+        for: 5m
+        labels:
+          severity: warning
+          service: platform
+          team: backend
+        annotations:
+          summary: "High error rate on {{ $labels.service }}"
+          description: "Error rate is above 5% for more than 5 minutes. Current value: {{ $value | printf \"%.2f\" }}%"
+          runbook_url: "https://runbooks.example.com/high-error-rate"
+
+      - alert: CriticalErrorRate
+        expr: sum(rate(http_requests_total{status=~"5.."}[5m])) by (service, job) / sum(rate(http_requests_total[5m])) by (service, job) * 100 > 20
+        for: 2m
+        labels:
+          severity: critical
+          service: platform
+          team: backend
+        annotations:
+          summary: "Critical error rate on {{ $labels.service }}"
+          description: "Error rate is above 20% for more than 2 minutes. Immediate action required. Current value: {{ $value | printf \"%.2f\" }}%"
+          runbook_url: "https://runbooks.example.com/critical-error-rate"
+
+      # High Latency
+      - alert: HighLatency
+        expr: histogram_quantile(0.95, sum(rate(http_request_duration_seconds_bucket[5m])) by (le, service)) > 1
+        for: 5m
+        labels:
+          severity: warning
+          service: platform
+          team: backend
+        annotations:
+          summary: "High latency on {{ $labels.service }}"
+          description: "p95 latency is above 1 second for more than 5 minutes. Current value: {{ $value | printf \"%.3f\" }}s"
+          runbook_url: "https://runbooks.example.com/high-latency"
+
+      - alert: CriticalLatency
+        expr: histogram_quantile(0.99, sum(rate(http_request_duration_seconds_bucket[5m])) by (le, service)) > 3
+        for: 2m
+        labels:
+          severity: critical
+          service: platform
+          team: backend
+        annotations:
+          summary: "Critical latency on {{ $labels.service }}"
+          description: "p99 latency is above 3 seconds for more than 2 minutes. Immediate action required. Current value: {{ $value | printf \"%.3f\" }}s"
+          runbook_url: "https://runbooks.example.com/critical-latency"
+
+      # Low Throughput
+      - alert: LowThroughput
+        expr: sum(rate(http_requests_total[5m])) by (service) < 10
+        for: 10m
+        labels:
+          severity: info
+          service: platform
+          team: backend
+        annotations:
+          summary: "Low throughput on {{ $labels.service }}"
+          description: "Request rate is below 10 req/s for more than 10 minutes. This may indicate a problem. Current value: {{ $value | printf \"%.2f\" }} req/s"
+          runbook_url: "https://runbooks.example.com/low-throughput"
+
+  - name: database_alerts
+    interval: 30s
+    rules:
+      # Database Connections
+      - alert: DatabaseConnectionsHigh
+        expr: aws_rds_database_connections > 80
+        for: 5m
+        labels:
+          severity: warning
+          component: database
+          team: backend
+        annotations:
+          summary: "High database connections on {{ $labels.rds_instance }}"
+          description: "Database connections are above 80 for more than 5 minutes. Current value: {{ $value }}"
+          runbook_url: "https://runbooks.example.com/db-connections"
+
+      - alert: DatabaseConnectionsCritical
+        expr: aws_rds_database_connections > 95
+        for: 2m
+        labels:
+          severity: critical
+          component: database
+          team: backend
+        annotations:
+          summary: "Critical database connections on {{ $labels.rds_instance }}"
+          description: "Database connections are above 95 for more than 2 minutes. Risk of connection exhaustion. Current value: {{ $value }}"
+          runbook_url: "https://runbooks.example.com/db-connections-critical"
+
+      # Database CPU
+      - alert: DatabaseCPUHigh
+        expr: aws_rds_cpu_utilization > 80
+        for: 5m
+        labels:
+          severity: warning
+          component: database
+          team: backend
+        annotations:
+          summary: "High database CPU on {{ $labels.rds_instance }}"
+          description: "Database CPU utilization is above 80% for more than 5 minutes. Current value: {{ $value | printf \"%.2f\" }}%"
+          runbook_url: "https://runbooks.example.com/db-cpu"
+
+      # Database Memory
+      - alert: DatabaseMemoryHigh
+        expr: aws_rds_freeable_memory < 1073741824
+        for: 5m
+        labels:
+          severity: warning
+          component: database
+          team: backend
+        annotations:
+          summary: "Low database memory on {{ $labels.rds_instance }}"
+          description: "Database freeable memory is below 1GB for more than 5 minutes. Current value: {{ $value | printf \"%.0f\" }} bytes"
+          runbook_url: "https://runbooks.example.com/db-memory"
+
+      # Database Latency
+      - alert: DatabaseLatencyHigh
+        expr: aws_rds_cpu_utilization > 50 and aws_rds_database_connections > 50
+        for: 5m
+        labels:
+          severity: warning
+          component: database
+          team: backend
+        annotations:
+          summary: "High database latency on {{ $labels.rds_instance }}"
+          description: "Database is experiencing high load with elevated CPU and connections."
+          runbook_url: "https://runbooks.example.com/db-latency"
+
+  - name: ecs_alerts
+    interval: 30s
+    rules:
+      # ECS Service Health
+      - alert: ECSServiceRunningTasksLow
+        expr: ecs_service_running_task_count < ecs_service_desired_task_count * 0.5
+        for: 5m
+        labels:
+          severity: critical
+          service: platform
+          team: infrastructure
+        annotations:
+          summary: "Low running tasks for {{ $labels.service_name }}"
+          description: "Running tasks ({{ $value }}) is less than 50% of desired tasks ({{ $labels.desired }}) for more than 5 minutes."
+          runbook_url: "https://runbooks.example.com/ecs-tasks-low"
+
+      - alert: ECSServiceCPUHigh
+        expr: ecs_service_cpu_utilization > 80
+        for: 5m
+        labels:
+          severity: warning
+          service: platform
+          team: infrastructure
+        annotations:
+          summary: "High ECS CPU on {{ $labels.service_name }}"
+          description: "ECS service CPU utilization is above 80% for more than 5 minutes. Current value: {{ $value | printf \"%.2f\" }}%"
+          runbook_url: "https://runbooks.example.com/ecs-cpu-high"
+
+      - alert: ECSServiceMemoryHigh
+        expr: ecs_service_memory_utilization > 80
+        for: 5m
+        labels:
+          severity: warning
+          service: platform
+          team: infrastructure
+        annotations:
+          summary: "High ECS memory on {{ $labels.service_name }}"
+          description: "ECS service memory utilization is above 80% for more than 5 minutes. Current value: {{ $value | printf \"%.2f\" }}%"
+          runbook_url: "https://runbooks.example.com/ecs-memory-high"
+
+  - name: network_alerts
+    interval: 30s
+    rules:
+      # Network Errors
+      - alert: NetworkErrorsHigh
+        expr: rate(node_network_receive_errors_total[5m]) + rate(node_network_transmit_errors_total[5m]) > 10
+        for: 5m
+        labels:
+          severity: warning
+          service: platform
+          team: infrastructure
+        annotations:
+          summary: "High network errors on {{ $labels.instance }}"
+          description: "Network error rate is above 10 errors/s for more than 5 minutes."
+          runbook_url: "https://runbooks.example.com/network-errors"
+
+      # ELB Errors
+      - alert: ELBTargetResponseTimeHigh
+        expr: aws_elb_target_response_time > 1
+        for: 5m
+        labels:
+          severity: warning
+          service: platform
+          team: infrastructure
+        annotations:
+          summary: "High ELB response time on {{ $labels.load_balancer }}"
+          description: "ELB target response time is above 1 second for more than 5 minutes. Current value: {{ $value | printf \"%.3f\" }}s"
+          runbook_url: "https://runbooks.example.com/elb-response-time"
+
+      - alert: ELBUnHealthyHosts
+        expr: aws_elb_healthy_host_count < aws_elb_min_elb_instance_count
+        for: 2m
+        labels:
+          severity: critical
+          service: platform
+          team: infrastructure
+        annotations:
+          summary: "Unhealthy hosts in {{ $labels.load_balancer }}"
+          description: "Number of healthy hosts is below minimum required for more than 2 minutes."
+          runbook_url: "https://runbooks.example.com/elb-unhealthy-hosts"
+
+  - name: business_alerts
+    interval: 60s
+    rules:
+      # Payment Failures
+      - alert: PaymentFailureRateHigh
+        expr: sum(increase(payment_failed_total[5m])) / sum(increase(payment_transactions_total[5m])) * 100 > 5
+        for: 5m
+        labels:
+          severity: critical
+          service: payments
+          team: backend
+        annotations:
+          summary: "High payment failure rate"
+          description: "Payment failure rate is above 5% for more than 5 minutes. Current value: {{ $value | printf \"%.2f\" }}%"
+          runbook_url: "https://runbooks.example.com/payment-failure"
+
+      # User Registration Anomaly
+      - alert: UserRegistrationsLow
+        expr: sum(rate(user_registrations_total[15m])) < 0.1
+        for: 30m
+        labels:
+          severity: warning
+          service: platform
+          team: backend
+        annotations:
+          summary: "Low user registration rate"
+          description: "User registration rate is significantly below normal for more than 30 minutes. This may indicate an issue with the registration flow."
+          runbook_url: "https://runbooks.example.com/low-registrations"
+
+  - name: security_alerts
+    interval: 30s
+    rules:
+      # Authentication Failures
+      - alert: HighAuthFailureRate
+        expr: sum(rate(auth_failures_total[5m])) by (service) > 10
+        for: 5m
+        labels:
+          severity: warning
+          service: platform
+          team: security
+        annotations:
+          summary: "High authentication failure rate on {{ $labels.service }}"
+          description: "Authentication failure rate is above 10/min for more than 5 minutes. This may indicate a brute force attack."
+          runbook_url: "https://runbooks.example.com/auth-failure"
+
+      # Rate Limiting
+      - alert: RateLimitApproaching
+        expr: rate(http_requests_total{status="429"}[5m]) / rate(http_requests_total[5m]) * 100 > 20
+        for: 10m
+        labels:
+          severity: info
+          service: platform
+          team: backend
+        annotations:
+          summary: "High rate limit responses on {{ $labels.service }}"
+          description: "More than 20% of requests are being rate limited. This may indicate unusual traffic patterns."
+          runbook_url: "https://runbooks.example.com/rate-limiting"
+
+  - name: availability_alerts
+    interval: 30s
+    rules:
+      # SLO Alert
+      - alert: SLOCritical
+        expr: (sum(http_requests_total{status!~"5.."}) / sum(http_requests_total)) * 100 < 99
+        for: 5m
+        labels:
+          severity: critical
+          service: platform
+          team: backend
+        annotations:
+          summary: "SLO critical - error budget burning"
+          description: "Availability is below 99% for more than 5 minutes. Error budget is being consumed rapidly."
+          runbook_url: "https://runbooks.example.com/slo-critical"
+
+      - alert: SLOWarning
+        expr: (sum(http_requests_total{status!~"5.."}) / sum(http_requests_total)) * 100 < 99.5
+        for: 15m
+        labels:
+          severity: warning
+          service: platform
+          team: backend
+        annotations:
+          summary: "SLO warning - error budget at risk"
+          description: "Availability is below 99.5% for more than 15 minutes. Error budget is being consumed."
+          runbook_url: "https://runbooks.example.com/slo-warning"
+
+      # Maintenance Window
+      - alert: UpgradeInProgress
+        expr: upgrade_in_progress == 1
+        for: 0s
+        labels:
+          severity: info
+          service: platform
+          team: infrastructure
+        annotations:
+          summary: "System upgrade in progress"
+          description: "A system upgrade is currently in progress. Some alerts may be inhibited."

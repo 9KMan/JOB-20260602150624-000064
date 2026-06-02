@@ -1,0 +1,70 @@
+# Code Owners
+# This file defines the default reviewers for different parts of the codebase
+
+# Default reviewers for everything
+* @github/team-ops @github/team-devops
+
+# Backend team owns backend-related files
+backend/ @github/team-backend
+backend/**/*.py @github/team-backend
+backend/Dockerfile @github/team-backend
+backend/requirements.txt @github/team-backend
+backend/package.json @github/team-backend
+
+# Frontend team owns frontend-related files
+frontend/ @github/team-frontend
+frontend/**/*.js @github/team-frontend
+frontend/**/*.jsx @github/team-frontend
+frontend/**/*.ts @github/team-frontend
+frontend/**/*.tsx @github/team-frontend
+frontend/package.json @github/team-frontend
+
+# DevOps owns infrastructure
+infra/ @github/team-devops
+infra/**/*.tf @github/team-devops
+infra/**/*.sh @github/team-devops
+
+# CI/CD configurations
+.github/ @github/team-devops
+.github/workflows/*.yml @github/team-devops
+.github/workflows/*.yaml @github/team-devops
+ci/ @github/team-devops
+scripts/ @github/team-devops
+
+# Security-related files
+**/security* @github/team-security
+**/*secret* @github/team-security
+**/.env* @github/team-security
+
+# Documentation
+*.md docs/ @github/team-docs
+docs/** @github/team-docs
+
+# Kubernetes configurations
+k8s/ @github/team-devops
+*.k8s.yaml @github/team-devops
+*.helm.yaml @github/team-devops
+
+# AWS Lambda functions
+lambda/ @github/team-backend
+
+# Terraform state and variables (require double approval)
+*.tfstate @github/team-devops @github/team-security
+*tfvars @github/team-devops @github/team-security
+
+# Database migrations
+migrations/ @github/team-backend @github/team-devops
+alembic/ @github/team-backend
+
+# Testing
+**/*.test.js @github/team-frontend
+**/*.test.ts @github/team-frontend
+**/*.spec.js @github/team-backend
+**/*.spec.ts @github/team-backend
+**/pytest.ini @github/team-backend
+tests/ @github/team-backend @github/team-frontend
+
+# Configuration files
+.config/ @github/team-ops
+Makefile @github/team-ops
+docker-compose*.yml @github/team-devops

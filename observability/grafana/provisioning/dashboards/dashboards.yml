@@ -1,0 +1,47 @@
+# Grafana Dashboard Provisioning Configuration
+# Discovers and loads dashboards from this directory
+# Version: 1.0.0
+
+apiVersion: 1
+
+providers:
+  - name: 'Service Directory Dashboards'
+    org_id: 1
+    folder: 'Service Directory Platform'
+    folder_uid: 'service-directory-dashboards'
+    type: file
+    disableDeletion: false
+    updateIntervalSeconds: 30
+    allowUiUpdates: true
+    options:
+      path: /etc/grafana/provisioning/dashboards
+      foldersFromFilesStructure: true
+      defaultName: dashboards
+    # Dashboard versions are tracked for rollback capability
+    version: 1
+
+  - name: 'Infrastructure Dashboards'
+    org_id: 1
+    folder: 'Infrastructure'
+    folder_uid: 'infrastructure-dashboards'
+    type: file
+    disableDeletion: false
+    updateIntervalSeconds: 60
+    allowUiUpdates: true
+    options:
+      path: /etc/grafana/provisioning/dashboards/infrastructure
+      foldersFromFilesStructure: false
+    version: 1
+
+  - name: 'Business Metrics Dashboards'
+    org_id: 1
+    folder: 'Business Metrics'
+    folder_uid: 'business-metrics-dashboards'
+    type: file
+    disableDeletion: false
+    updateIntervalSeconds: 60
+    allowUiUpdates: true
+    options:
+      path: /etc/grafana/provisioning/dashboards/business
+      foldersFromFilesStructure: false
+    version: 1

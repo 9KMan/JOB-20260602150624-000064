@@ -1,0 +1,305 @@
+# Alertmanager Configuration for Premium Service Directory Platform
+# Version: 1.0.0
+
+global:
+  resolve_timeout: 5m
+  smtp_smarthost: 'smtp.example.com:587'
+  smtp_from: 'alerts@example.com'
+  smtp_auth_username: 'alerts@example.com'
+  smtp_auth_identity: 'alerts@example.com'
+  smtp_auth_password: '${SMTP_AUTH_PASSWORD}'
+  pagerduty_url: 'https://events.pagerduty.com/v2/enqueue'
+  pagerduty_flavor: 'v2'
+
+# Templates for notifications
+templates:
+  - '/etc/alertmanager/templates/*.tmpl'
+
+# Inhibition rules - prevent alert storms by inhibiting related alerts
+inhibit_rules:
+  # Inhibit service-down alerts if the entire node is down
+  - source_matchers:
+      - severity = "critical"
+      - alertname = "HostDown"
+    target_matchers:
+      - severity = "critical"
+      - alertname = "ServiceDown"
+    equal:
+      - cluster
+      - instance
+
+  # Inhibit high CPU/memory alerts if the service itself is down
+  - source_matchers:
+      - severity = "critical"
+      - alertname = "ServiceDown"
+    target_matchers:
+      - severity = "warning"
+      - alertname = "HighCPU|HighMemory"
+    equal:
+      - cluster
+      - service
+
+  # Inhibit database alerts if the database instance is unreachable
+  - source_matchers:
+      - severity = "critical"
+      - alertname = "DatabaseUnreachable"
+    target_matchers:
+      - severity = "warning"
+      - alertname = "DatabaseConnectionsHigh|DatabaseLatencyHigh"
+    equal:
+      - cluster
+      - database
+
+  # Inhibit network alerts during maintenance windows
+  - source_matchers:
+      - severity = "critical"
+      - alertname = "NetworkUnreachable"
+    target_matchers:
+      - severity = "info"
+      - alertname = "NetworkLatencyHigh"
+    equal:
+      - cluster
+
+  # Inhibit alerts for services being upgraded
+  - source_matchers:
+      - alertname = "UpgradeInProgress"
+    target_matchers:
+      - severity = "warning"
+      - alertname = "HighCPU|HighMemory|HighDisk"
+    equal:
+      - cluster
+      - namespace
+
+# Route tree for alert routing
+route:
+  receiver: 'default-receiver'
+  group_by: ['cluster', 'alertname', 'severity']
+  group_wait: 30s
+  group_interval: 5m
+  repeat_interval: 4h
+  pre_sent_header: 'X-Priority'
+  
+  # Severity-based routing
+  routes:
+    # Critical alerts - immediate notification to all channels
+    - match:
+        severity: critical
+      receiver: 'critical-receiver'
+      group_wait: 10s
+      repeat_interval: 1h
+      continue: true
+
+    # Warning alerts - notify primary on-call
+    - match:
+        severity: warning
+      receiver: 'warning-receiver'
+      group_wait: 1m
+      repeat_interval: 4h
+
+    # Info alerts - log only, no active notification
+    - match:
+        severity: info
+      receiver: 'info-receiver'
+      group_wait: 5m
+      repeat_interval: 12h
+
+    # Service-specific routing
+    - match:
+        service: backend-api
+      receiver: 'backend-api-receiver'
+      routes:
+        - match:
+            alertname: 'HighLatency'
+          receiver: 'backend-latency-receiver'
+          continue: true
+        - match:
+            alertname: 'HighErrorRate'
+          receiver: 'backend-errors-receiver'
+
+    # Database alerts
+    - match:
+        component: database
+      receiver: 'database-receiver'
+      routes:
+        - match:
+            alertname: 'DatabaseDown'
+          receiver: 'database-critical-receiver'
+          continue: true
+        - match:
+            alertname: 'DatabaseConnectionsHigh'
+          receiver: 'database-connections-receiver'
+
+    # Frontend alerts
+    - match:
+        service: frontend
+      receiver: 'frontend-receiver'
+      routes:
+        - match:
+            alertname: 'FrontendDown'
+          receiver: 'frontend-critical-receiver'
+
+# Receivers configuration
+receivers:
+  # Default receiver for minor issues
+  - name: 'default-receiver'
+    email_configs:
+      - to: 'team@example.com'
+        send_resolved: true
+        headers:
+          subject: '{{ .GroupLabels.alertname }} - {{ .Status }}'
+
+  # Critical alerts - all channels
+  - name: 'critical-receiver'
+    slack_configs:
+      - api_url: '${SLACK_WEBHOOK_URL}'
+        channel: '#critical-alerts'
+        send_resolved: true
+        title: '{{ range.alerts }}{{ .Annotations.summary }}{{ end }}'
+        text: |
+          :rotating_light: *Critical Alert*
+          {{ range.alerts }}
+          *Alert:* {{ .Labels.alertname }}
+          *Severity:* {{ .Labels.severity }}
+          *Cluster:* {{ .Labels.cluster }}
+          *Service:* {{ .Labels.service }}
+          *Summary:* {{ .Annotations.summary }}
+          *Description:* {{ .Annotations.description }}
+          *Started:* {{ .StartsAt.Format "2006-01-02 15:04:05 MST" }}
+          {{ if .Annotations.runbook_url }}*Runbook:* {{ .Annotations.runbook_url }}{{ end }}
+          {{ end }}
+        color: '{{ if eq .Status "firing" }}danger{{ else }}good{{ end }}'
+        footer: 'Prometheus Alertmanager'
+        timestamp: '{{ .StartsAt.Unix }}'
+    email_configs:
+      - to: 'oncall-critical@example.com'
+        send_resolved: true
+        headers:
+          subject: '[CRITICAL] {{ .GroupLabels.alertname }}'
+          priority: 'high'
+    pagerduty_configs:
+      - service_key: '${PAGERDUTY_SERVICE_KEY}'
+        event_action: '{{ if eq .Status "firing" }}trigger{{ else }}resolve{{ end }}'
+        severity: critical
+        custom_details:
+          alert_name: '{{ .Labels.alertname }}'
+          cluster: '{{ .Labels.cluster }}'
+          service: '{{ .Labels.service }}'
+          summary: '{{ .Annotations.summary }}'
+          description: '{{ .Annotations.description }}'
+          runbook_url: '{{ .Annotations.runbook_url }}'
+    webhook_configs:
+      - url: '${WEBHOOK_CRITICAL_URL}'
+        send_resolved: true
+        http_config:
+          timeout: 10s
+
+  # Warning alerts - on-call primary
+  - name: 'warning-receiver'
+    slack_configs:
+      - api_url: '${SLACK_WEBHOOK_URL}'
+        channel: '#warning-alerts'
+        send_resolved: true
+        title: '{{ range.alerts }}{{ .Annotations.summary }}{{ end }}'
+        text: |
+          :warning: *Warning Alert*
+          {{ range.alerts }}
+          *Alert:* {{ .Labels.alertname }}
+          *Severity:* {{ .Labels.severity }}
+          *Cluster:* {{ .Labels.cluster }}
+          *Service:* {{ .Labels.service }}
+          *Summary:* {{ .Annotations.summary }}
+          *Description:* {{ .Annotations.description }}
+          {{ if .Annotations.runbook_url }}*Runbook:* {{ .Annotations.runbook_url }}{{ end }}
+          {{ end }}
+        color: '{{ if eq .Status "firing" }}warning{{ else }}good{{ end }}'
+    email_configs:
+      - to: 'team@example.com'
+        send_resolved: true
+        headers:
+          subject: '[WARNING] {{ .GroupLabels.alertname }}'
+
+  # Info alerts - logging only
+  - name: 'info-receiver'
+    slack_configs:
+      - api_url: '${SLACK_WEBHOOK_URL}'
+        channel: '#info-alerts'
+        send_resolved: true
+        text: |
+          :information_source: *Info Alert*
+          {{ range.alerts }}
+          *Alert:* {{ .Labels.alertname }}
+          *Summary:* {{ .Annotations.summary }}
+          {{ end }}
+        color: good
+
+  # Backend API specific
+  - name: 'backend-api-receiver'
+    slack_configs:
+      - api_url: '${SLACK_WEBHOOK_URL}'
+        channel: '#backend-alerts'
+        send_resolved: true
+    email_configs:
+      - to: 'backend-team@example.com'
+        send_resolved: true
+
+  - name: 'backend-latency-receiver'
+    pagerduty_configs:
+      - service_key: '${PAGERDUTY_SERVICE_KEY}'
+        event_action: trigger
+        severity: warning
+
+  - name: 'backend-errors-receiver'
+    pagerduty_configs:
+      - service_key: '${PAGERDUTY_SERVICE_KEY}'
+        event_action: trigger
+        severity: warning
+    webhook_configs:
+      - url: '${BACKEND_ERRORS_WEBHOOK}'
+        send_resolved: true
+
+  # Database specific
+  - name: 'database-receiver'
+    slack_configs:
+      - api_url: '${SLACK_WEBHOOK_URL}'
+        channel: '#database-alerts'
+        send_resolved: true
+    email_configs:
+      - to: 'dba-team@example.com'
+        send_resolved: true
+
+  - name: 'database-critical-receiver'
+    slack_configs:
+      - api_url: '${SLACK_WEBHOOK_URL}'
+        channel: '#database-critical'
+        send_resolved: true
+    pagerduty_configs:
+      - service_key: '${PAGERDUTY_SERVICE_KEY}'
+        event_action: trigger
+        severity: critical
+
+  - name: 'database-connections-receiver'
+    email_configs:
+      - to: 'dba-team@example.com'
+        send_resolved: true
+
+  # Frontend specific
+  - name: 'frontend-receiver'
+    slack_configs:
+      - api_url: '${SLACK_WEBHOOK_URL}'
+        channel: '#frontend-alerts'
+        send_resolved: true
+
+  - name: 'frontend-critical-receiver'
+    slack_configs:
+      - api_url: '${SLACK_WEBHOOK_URL}'
+        channel: '#frontend-critical'
+        send_resolved: true
+    pagerduty_configs:
+      - service_key: '${PAGERDUTY_SERVICE_KEY}'
+        event_action: trigger
+        severity: critical
+
+# File for storing notification state
+notification_log:
+  filename: '/data/alertmanager/notification_log'
+  retention: 120h

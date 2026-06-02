@@ -1,0 +1,55 @@
+# Grafana Datasource Provisioning Configuration
+# Configures Prometheus as the primary datasource
+# Version: 1.0.0
+
+apiVersion: 1
+
+datasources:
+  - name: Prometheus
+    type: prometheus
+    access: proxy
+    url: http://prometheus:9090
+    isDefault: true
+    editable: false
+    jsonData:
+      timeInterval: 15s
+      queryTimeout: 60s
+      httpMethod: POST
+      prometheusType: Prometheus
+      prometheusVersion: 2.40.0
+      cacheTimeout: 30s
+      direction: outgoing
+      httpHeaderName1: Authorization
+    secureJsonData:
+      httpHeaderValue1: Bearer ${PROMETHEUS_API_TOKEN}
+    version: 1
+
+  - name: Prometheus-Logs
+    type: prometheus
+    access: proxy
+    url: http://prometheus-logs:9090
+    isDefault: false
+    editable: false
+    jsonData:
+      timeInterval: 15s
+      queryTimeout: 60s
+      httpMethod: POST
+    version: 1
+
+  # CloudWatch for AWS infrastructure metrics
+  - name: CloudWatch
+    type: cloudwatch
+    jsonData:
+      authType: default
+      defaultRegion: us-east-1
+      customMetricsNamespaces: 'AWS/EC2,AWS/ECS,AWS/RDS,AWS/ELB,AWS/S3'
+    version: 1
+
+  # Alerting datasource
+  - name: Alertmanager
+    type: alertmanager
+    access: proxy
+    url: http://alertmanager:9093
+    jsonData:
+      implementation: prometheus
+    version: 1

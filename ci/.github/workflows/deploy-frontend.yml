@@ -1,0 +1,277 @@
+name: Deploy Frontend
+
+on:
+  push:
+    branches:
+      - main
+    paths:
+      - 'frontend/**'
+      - 'scripts/deploy-frontend.sh'
+
+env:
+  AWS_REGION: us-east-1
+  S3_BUCKET: premium-service-frontend
+  CLOUDFRONT_DISTRIBUTION_ID: E1234567890ABC
+  CLOUDFRONT_PATH_PATTERN: /_next/static/*
+  NEXT_PUBLIC_API_URL: https://api.premiumservice.com
+  NEXT_PUBLIC_AUTH0_DOMAIN: premium-service.auth0.com
+
+permissions:
+  contents: read
+  id-token: write
+
+jobs:
+  build:
+    name: Build Next.js Application
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+
+      - name: Setup Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: '20'
+          cache: 'npm'
+
+      - name: Get npm cache directory
+        id: npm-cache
+        shell: bash
+        run: echo "dir=$(npm config get cache)" >> $GITHUB_OUTPUT
+
+      - name: Cache npm dependencies
+        uses: actions/cache@v4
+        with:
+          path: ~/.npm
+          key: ${{ runner.os }}-npm-${{ hashFiles('**/frontend/package-lock.json') }}
+          restore-keys: |
+            ${{ runner.os }}-npm-
+
+      - name: Install dependencies
+        run: npm ci
+        working-directory: ./frontend
+
+      - name: Restore previous build cache
+        uses: actions/cache/restore@v4
+        with:
+          path: |
+            .next/cache
+            node_modules/.cache
+          key: ${{ runner.os }}-nextjs-${{ hashFiles('**/frontend/package-lock.json') }}
+          restore-keys: |
+            ${{ runner.os }}-nextjs-
+
+      - name: Build Next.js application
+        run: |
+          npm run build
+        working-directory: ./frontend
+        env:
+          NEXT_PUBLIC_API_URL: ${{ env.NEXT_PUBLIC_API_URL }}
+          NEXT_PUBLIC_AUTH0_DOMAIN: ${{ env.NEXT_PUBLIC_AUTH0_DOMAIN }}
+          NEXT_PUBLIC_SENTRY_DSN: ${{ secrets.NEXT_PUBLIC_SENTRY_DSN }}
+
+      - name: Upload build artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: frontend-build
+          path: |
+            frontend/.next
+            frontend/public
+          retention-days: 7
+
+      - name: Generate deployment summary
+        shell: bash
+        run: |
+          BUILD_TIME=$(date -u +"%Y-%m-%dT%H:%M:%SZ")
+          echo "build_time=$BUILD_TIME" >> $GITHUB_OUTPUT
+          echo "commit_short=$(git rev-parse --short ${{ github.sha }})" >> $GITHUB_OUTPUT
+
+  deploy-to-s3:
+    name: Deploy to S3
+    runs-on: ubuntu-latest
+    needs: build
+
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+
+      - name: Download build artifact
+        uses: actions/download-artifact@v4
+        with:
+          name: frontend-build
+          path: ./frontend
+
+      - name: Configure AWS credentials
+        uses: aws-actions/configure-aws-credentials@v4
+        with:
+          aws-access-key-id: ${{ secrets.AWS_ACCESS_KEY_ID }}
+          aws-secret-access-key: ${{ secrets.AWS_SECRET_ACCESS_KEY }}
+          aws-region: ${{ env.AWS_REGION }}
+
+      - name: Sync to S3 with caching headers
+        run: |
+          aws s3 sync ./frontend/.next/static s3://${{ env.S3_BUCKET }}/_next/static \
+            --delete \
+            --cache-control "public, max-age=31536000, immutable" \
+            --exclude "*" \
+            --include "*.js" \
+            --include "*.css"
+
+          aws s3 sync ./frontend/public s3://${{ env.S3_BUCKET }}/ \
+            --delete \
+            --cache-control "public, max-age=600" \
+            --exclude "_next/*"
+
+          aws s3 sync ./frontend/.next/static s3://${{ env.S3_BUCKET }}/_next/static \
+            --delete \
+            --cache-control "public, max-age=31536000, immutable" \
+            --exclude "*" \
+            --include "*.js" \
+            --include "*.css"
+
+      - name: Upload Next.js cache
+        run: |
+          aws s3 sync .next/cache/s3 s3://${{ env.S3_BUCKET }}/_next/cache \
+            --delete 2>/dev/null || true
+
+      - name: Set S3 bucket policy for CloudFront
+        run: |
+          aws s3 putucketPolicy \
+            --bucket ${{ env.S3_BUCKET }} \
+            --policy '{
+              "Version": "2012-10-17",
+              "Statement": [
+                {
+                  "Sid": "CloudFrontOriginAccessIdentity",
+                  "Effect": "Allow",
+                  "Principal": {
+                    "AWS": "arn:aws:cloudfront::123456789012:user/CloudFront-Origin-Access-Identity"
+                  },
+                  "Action": "s3:GetObject",
+                  "Resource": "arn:aws:s3:::'$${{ env.S3_BUCKET }}'/*"
+                }
+              ]
+            }'
+
+  invalidate-cloudfront:
+    name: Invalidate CloudFront Cache
+    runs-on: ubuntu-latest
+    needs: deploy-to-s3
+
+    steps:
+      - name: Configure AWS credentials
+        uses: aws-actions/configure-aws-credentials@v4
+        with:
+          aws-access-key-id: ${{ secrets.AWS_ACCESS_KEY_ID }}
+          aws-secret-access-key: ${{ secrets.AWS_SECRET_ACCESS_KEY }}
+          aws-region: ${{ env.AWS_REGION }}
+
+      - name: Create CloudFront invalidation
+        id: invalidation
+        run: |
+          INVALIDATION_ID=$(aws cloudfront create-invalidation \
+            --distribution-id ${{ env.CLOUDFRONT_DISTRIBUTION_ID }} \
+            --paths "/_next/static/*" "/api/*" "/*" \
+            --query Invalidation.Id \
+            --output text)
+          echo "invalidation_id=$INVALIDATION_ID" >> $GITHUB_OUTPUT
+
+      - name: Wait for invalidation to complete
+        run: |
+          echo "Waiting for CloudFront invalidation: ${{ steps.invalidation.outputs.invalidation_id }}"
+          aws cloudfront wait invalidation-completed \
+            --distribution-id ${{ env.CLOUDFRONT_DISTRIBUTION_ID }} \
+            --id ${{ steps.invalidation.outputs.invalidation_id }}
+          echo "CloudFront cache invalidation completed"
+
+  health-check:
+    name: Health Check
+    runs-on: ubuntu-latest
+    needs: invalidate-cloudfront
+
+    steps:
+      - name: Health check on frontend
+        run: |
+          FRONTEND_URL="https://www.premiumservice.com"
+          MAX_ATTEMPTS=15
+          ATTEMPT=0
+          FRONTEND_HEALTHY=false
+
+          while [ $ATTEMPT -lt $MAX_ATTEMPTS ]; do
+            ATTEMPT=$((ATTEMPT + 1))
+            echo "Health check attempt $ATTEMPT of $MAX_ATTEMPTS..."
+
+            HTTP_STATUS=$(curl -s -o /dev/null -w "%{http_code}" $FRONTEND_URL)
+            if [ "$HTTP_STATUS" = "200" ]; then
+              FRONTEND_HEALTHY=true
+              break
+            fi
+
+            sleep 10
+          done
+
+          if [ "$FRONTEND_HEALTHY" = false ]; then
+            echo "Frontend health check failed after $MAX_ATTEMPTS attempts"
+            exit 1
+          fi
+
+          echo "Frontend health check passed"
+
+      - name: Verify critical assets are accessible
+        run: |
+          CRITICAL_ASSETS=(
+            "https://www.premiumservice.com/_next/static/js/main.js"
+            "https://www.premiumservice.com/_next/static/css/main.css"
+          )
+
+          for ASSET in "${CRITICAL_ASSETS[@]}"; do
+            HTTP_STATUS=$(curl -s -o /dev/null -w "%{http_code}" "$ASSET")
+            echo "Checking $ASSET - Status: $HTTP_STATUS"
+            if [ "$HTTP_STATUS" != "200" ] && [ "$HTTP_STATUS" != "304" ]; then
+              echo "Critical asset $ASSET returned status $HTTP_STATUS"
+            fi
+          done
+
+  notify:
+    name: Slack Notification
+    runs-on: ubuntu-latest
+    needs: [health-check]
+    if: always()
+
+    steps:
+      - name: Send success notification
+        if: needs.health-check.result == 'success'
+        run: |
+          curl -X POST ${{ secrets.SLACK_WEBHOOK_URL }} \
+            -H 'Content-type: application/json' \
+            --data '{
+              "text": "✅ Frontend deployment succeeded",
+              "blocks": [
+                {
+                  "type": "section",
+                  "text": {
+                    "type": "mrkdwn",
+                    "text": "*Frontend Deployment - Success*\n• Environment: Production\n• Commit: `${{ github.sha }}`\n• Deployed by: `${{ github.actor }}`\n• CloudFront Invalidation: `${{ needs.invalidate-cloudfront.outputs.invalidation_id }}`\n• <https://console.aws.amazon.com/s3/buckets/'$${{ env.S3_BUCKET }}'|View S3 Bucket>"
+                  }
+                }
+              ]
+            }'
+
+      - name: Send failure notification
+        if: needs.health-check.result != 'success'
+        run: |
+          curl -X POST ${{ secrets.SLACK_WEBHOOK_URL }} \
+            -H 'Content-type: application/json' \
+            --data '{
+              "text": "❌ Frontend deployment failed",
+              "blocks": [
+                {
+                  "type": "section",
+                  "text": {
+                    "type": "mrkdwn",
+                    "text": "*Frontend Deployment - FAILED*\n• Environment: Production\n• Commit: `${{ github.sha }}`\n• Deployed by: `${{ github.actor }}`\n• <${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}|View Logs>"
+                  }
+                }
+              ]
+            }'

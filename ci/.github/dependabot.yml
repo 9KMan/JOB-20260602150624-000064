@@ -1,0 +1,147 @@
+version: 2
+updates:
+  - package-ecosystem: npm
+    directory: /frontend
+    schedule:
+      interval: weekly
+      day: monday
+      time: '09:00'
+      timezone: America/New_York
+    open-pull-requests-limit: 10
+    labels:
+      - dependencies
+      - npm
+    commit-message:
+      prefix: fix
+      include: scope
+    reviewers:
+      - team/backend
+      - team/frontend
+    allow:
+      - dependency-type: production
+      - dependency-type: development
+    ignore:
+      - dependency-name: '*'
+        update-types: ['version-update:semver-major']
+    groups:
+      frontend-dependencies:
+        files:
+          - frontend/package.json
+          - frontend/package-lock.json
+        patterns:
+          - '*'
+        update-types:
+          - minor
+          - patch
+      dev-dependencies:
+        directory: /frontend
+        update-types:
+          - patch
+
+  - package-ecosystem: npm
+    directory: /backend
+    schedule:
+      interval: weekly
+      day: monday
+      time: '09:00'
+      timezone: America/New_York
+    open-pull-requests-limit: 10
+    labels:
+      - dependencies
+      - npm
+    reviewers:
+      - team/backend
+    allow:
+      - dependency-type: production
+      - dependency-type: development
+    ignore:
+      - dependency-name: 'aws-sdk'
+        update-types: ['version-update:semver-major']
+    groups:
+      backend-dependencies:
+        files:
+          - backend/package.json
+          - backend/package-lock.json
+        update-types:
+          - minor
+          - patch
+
+  - package-ecosystem: pip
+    directory: /backend
+    schedule:
+      interval: weekly
+      day: monday
+      time: '09:00'
+      timezone: America/New_York
+    open-pull-requests-limit: 10
+    labels:
+      - dependencies
+      - python
+    reviewers:
+      - team/backend
+    commit-message:
+      prefix: fix
+      include: scope
+    allow:
+      - dependency-type: production
+      - dependency-type: development
+    ignore:
+      - dependency-name: 'boto3'
+        update-types: ['version-update:semver-major']
+      - dependency-name: 'botocore'
+        update-types: ['version-update:semver-major']
+    groups:
+      python-dependencies:
+        patterns:
+          - '*'
+        update-types:
+          - minor
+          - patch
+
+  - package-ecosystem: docker
+    directory: /backend
+    schedule:
+      interval: weekly
+      day: sunday
+      time: '09:00'
+      timezone: America/New_York
+    open-pull-requests-limit: 5
+    labels:
+      - dependencies
+      - docker
+    reviewers:
+      - team/backend
+    commit-message:
+      prefix: chore
+      include: scope
+    allow:
+      - dependency-type: all
+    ignore:
+      - dependency-name: 'python'
+        update-types: ['version-update:semver-major']
+
+  - package-ecosystem: github-actions
+    directory: /
+    schedule:
+      interval: weekly
+      day: monday
+      time: '09:00'
+      timezone: America/New_York
+    open-pull-requests-limit: 5
+    labels:
+      - dependencies
+      - github-actions
+    reviewers:
+      - team/devops
+    commit-message:
+      prefix: ci
+      include: scope
+    allow:
+      - dependency-type: production
+    groups:
+      github-actions:
+        patterns:
+          - '*'
+        update-types:
+          - minor
+          - patch

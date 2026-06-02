@@ -1,0 +1,292 @@
+name: Deploy Backend
+
+on:
+  push:
+    branches:
+      - main
+    paths:
+      - 'backend/**'
+      - 'scripts/deploy-ecs.sh'
+      - 'scripts/run-migrations.sh'
+      - 'scripts/health-check.sh'
+
+env:
+  AWS_REGION: us-east-1
+  ECR_REPOSITORY: premium-service-directory
+  ECS_CLUSTER: premium-service-cluster
+  ECS_SERVICE: backend-service
+  ECS_TASK_DEFINITION: backend-task
+  ECS_TASK_FAMILY: premium-service-backend
+
+permissions:
+  contents: read
+  id-token: write
+
+jobs:
+  build-and-push:
+    name: Build and Push Docker Image
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+
+      - name: Configure AWS credentials
+        uses: aws-actions/configure-aws-credentials@v4
+        with:
+          aws-access-key-id: ${{ secrets.AWS_ACCESS_KEY_ID }}
+          aws-secret-access-key: ${{ secrets.AWS_SECRET_ACCESS_KEY }}
+          aws-region: ${{ env.AWS_REGION }}
+
+      - name: Login to Amazon ECR
+        id: login-ecr
+        uses: aws-actions/amazon-ecr-login@v2
+
+      - name: Set up Docker Buildx
+        uses: docker/setup-buildx-action@v3
+
+      - name: Extract metadata for Docker
+        id: meta
+        uses: docker/metadata-action@v5
+        with:
+          images: ${{ env.AWS_ACCOUNT_ID }}.dkr.ecr.${{ env.AWS_REGION }}.amazonaws.com/${{ env.ECR_REPOSITORY }}
+          tags: |
+            type=sha,prefix=,suffix=
+            type=ref,event=branch
+            type=semver,pattern={{version}}
+
+      - name: Build and push Docker image
+        uses: docker/build-push-action@v5
+        with:
+          context: ./backend
+          push: true
+          tags: ${{ steps.meta.outputs.tags }}
+          labels: ${{ steps.meta.outputs.labels }}
+          cache-from: type=gha
+          cache-to: type=gha,mode=max
+
+      - name: Export image digest
+        id: digest
+        shell: bash
+        run: |
+          echo "digest=$(docker inspect ${{ env.AWS_ACCOUNT_ID }}.dkr.ecr.${{ env.AWS_REGION }}.amazonaws.com/${{ env.ECR_REPOSITORY }}:$(echo ${{ steps.meta.outputs.tags }} | cut -d: -f2) --format '{{.RepoDigests}}')" >> $GITHUB_OUTPUT
+
+      - name: Upload Docker build logs
+        uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: docker-build-logs
+          path: /tmp/docker-build-*.log
+          retention-days: 7
+
+  run-migrations:
+    name: Run Database Migrations
+    runs-on: ubuntu-latest
+    needs: build-and-push
+
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+
+      - name: Configure AWS credentials
+        uses: aws-actions/configure-aws-credentials@v4
+        with:
+          aws-access-key-id: ${{ secrets.AWS_ACCESS_KEY_ID }}
+          aws-secret-access-key: ${{ secrets.AWS_SECRET_ACCESS_KEY }}
+          aws-region: ${{ env.AWS_REGION }}
+
+      - name: Install Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.11'
+
+      - name: Install dependencies
+        run: |
+          pip install alembic psycopg2-binary aws-secrets-manager
+        working-directory: ./backend
+
+      - name: Run database migrations
+        run: |
+          export DB_HOST=${{ secrets.DB_HOST }}
+          export DB_PORT=${{ secrets.DB_PORT }}
+          export DB_NAME=${{ secrets.DB_NAME }}
+          export DB_USER=${{ secrets.DB_USER }}
+          export DB_PASSWORD=${{ secrets.DB_PASSWORD }}
+
+          cd backend
+          alembic upgrade head
+
+      - name: Rollback on failure
+        if: failure()
+        run: |
+          cd backend
+          alembic downgrade -1
+        continue-on-error: true
+
+  deploy-to-ecs:
+    name: Deploy to ECS Fargate
+    runs-on: ubuntu-latest
+    needs: [build-and-push, run-migrations]
+    if: always() && needs.build-and-push.result == 'success'
+
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+
+      - name: Configure AWS credentials
+        uses: aws-actions/configure-aws-credentials@v4
+        with:
+          aws-access-key-id: ${{ secrets.AWS_ACCESS_KEY_ID }}
+          aws-secret-access-key: ${{ secrets.AWS_SECRET_ACCESS_KEY }}
+          aws-region: ${{ env.AWS_REGION }}
+
+      - name: Login to Amazon ECR
+        id: login-ecr
+        uses: aws-actions/amazon-ecr-login@v2
+
+      - name: Download task definition
+        run: |
+          aws ecs describe-task-definition --task-definition ${{ env.ECS_TASK_FAMILY }} \
+            --query taskDefinition > task-definition.json
+
+      - name: Update task definition with new image
+        id: task-def
+        uses: aws-actions/amazon-ecs-render-task-definition@v1
+        with:
+          task-definition: task-definition.json
+          container-name: backend
+          image: ${{ env.AWS_ACCOUNT_ID }}.dkr.ecr.${{ env.AWS_REGION }}.amazonaws.com/${{ env.ECR_REPOSITORY }}:sha-$(git rev-parse --short ${{ github.sha }})
+
+      - name: Deploy to ECS service
+        uses: aws-actions/amazon-ecs-deploy-task-definition@v2
+        with:
+          task-definition: ${{ steps.task-def.outputs.task-definition }}
+          service: ${{ env.ECS_SERVICE }}
+          cluster: ${{ env.ECS_CLUSTER }}
+          wait-for-service-stability: true
+          circuit-breaker:
+            enable: true
+            rollback: true
+
+      - name: Store deployment timestamp
+        id: deployment
+        shell: bash
+        run: |
+          echo "timestamp=$(date -u +"%Y-%m-%dT%H:%M:%SZ")" >> $GITHUB_OUTPUT
+          echo "version=$(git rev-parse --short ${{ github.sha }})" >> $GITHUB_OUTPUT
+
+  health-check:
+    name: Health Check
+    runs-on: ubuntu-latest
+    needs: deploy-to-ecs
+
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+
+      - name: Configure AWS credentials
+        uses: aws-actions/configure-aws-credentials@v4
+        with:
+          aws-access-key-id: ${{ secrets.AWS_ACCESS_KEY_ID }}
+          aws-secret-access-key: ${{ secrets.AWS_SECRET_ACCESS_KEY }}
+          aws-region: ${{ env.AWS_REGION }}
+
+      - name: Wait for deployment
+        run: |
+          echo "Waiting for ECS deployment to stabilize..."
+          aws ecs wait services-stable \
+            --services ${{ env.ECS_SERVICE }} \
+            --cluster ${{ env.ECS_CLUSTER }}
+
+      - name: Get ALB DNS name
+        id: alb
+        run: |
+          ALB_DNS=$(aws elbv2 describe-load-balancers \
+            --names premium-service-alb \
+            --query LoadBalancers[0].DNSName \
+            --output text)
+          echo "alb_dns=$ALB_DNS" >> $GITHUB_OUTPUT
+
+      - name: Health check on /health endpoint
+        run: |
+          MAX_ATTEMPTS=30
+          ATTEMPT=0
+          BACKEND_HEALTHY=false
+
+          while [ $ATTEMPT -lt $MAX_ATTEMPTS ]; do
+            ATTEMPT=$((ATTEMPT + 1))
+            echo "Health check attempt $ATTEMPT of $MAX_ATTEMPTS..."
+
+            HTTP_STATUS=$(curl -s -o /dev/null -w "%{http_code}" http://${{ steps.alb.outputs.alb_dns }}/health)
+
+            if [ "$HTTP_STATUS" = "200" ]; then
+              BACKEND_HEALTHY=true
+              break
+            fi
+
+            sleep 10
+          done
+
+          if [ "$BACKEND_HEALTHY" = false ]; then
+            echo "Health check failed after $MAX_ATTEMPTS attempts"
+            exit 1
+          fi
+
+          echo "Backend health check passed"
+
+      - name: Check all service endpoints
+        run: |
+          SERVICES=("api" "auth" "search")
+          for SERVICE in "${SERVICES[@]}"; do
+            echo "Checking $SERVICE endpoint..."
+            HTTP_STATUS=$(curl -s -o /dev/null -w "%{http_code}" http://${{ steps.alb.outputs.alb_dns }}/$SERVICE/health)
+            if [ "$HTTP_STATUS" = "200" ]; then
+              echo "$SERVICE is healthy"
+            else
+              echo "$SERVICE health check returned $HTTP_STATUS"
+              exit 1
+            fi
+          done
+
+  notify:
+    name: Slack Notification
+    runs-on: ubuntu-latest
+    needs: [deploy-to-ecs, health-check]
+    if: always()
+
+    steps:
+      - name: Send success notification
+        if: needs.deploy-to-ecs.result == 'success' && needs.health-check.result == 'success'
+        run: |
+          curl -X POST ${{ secrets.SLACK_WEBHOOK_URL }} \
+            -H 'Content-type: application/json' \
+            --data '{
+              "text": "✅ Backend deployment succeeded",
+              "blocks": [
+                {
+                  "type": "section",
+                  "text": {
+                    "type": "mrkdwn",
+                    "text": "*Backend Deployment - Success*\n• Environment: Production\n• Commit: `${{ github.sha }}`\n• Deployed by: `${{ github.actor }}`\n• <https://console.aws.amazon.com/ecs/home#/clusters/premium-service-cluster/services|View ECS Service>"
+                  }
+                }
+              ]
+            }'
+
+      - name: Send failure notification
+        if: needs.deploy-to-ecs.result != 'success' || needs.health-check.result != 'success'
+        run: |
+          curl -X POST ${{ secrets.SLACK_WEBHOOK_URL }} \
+            -H 'Content-type: application/json' \
+            --data '{
+              "text": "❌ Backend deployment failed",
+              "blocks": [
+                {
+                  "type": "section",
+                  "text": {
+                    "type": "mrkdwn",
+                    "text": "*Backend Deployment - FAILED*\n• Environment: Production\n• Commit: `${{ github.sha }}`\n• Deployed by: `${{ github.actor }}`\n• <${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}|View Logs>"
+                  }
+                }
+              ]
+            }'
