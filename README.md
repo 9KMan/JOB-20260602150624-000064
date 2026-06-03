@@ -1,6 +1,5 @@
 # Premium Service Directory Platform — Build Phase
 
-**Lead:** https://www.upwork.com/jobs/~022061752658903002322
 **Client:** Premium Service Directory Platform
 **Tier:** LARGE | **Budget:** hourly ($25-47/hr, >30hrs/wk, >6mo, expert)
 
